@@ -8,7 +8,6 @@
 
 #![no_std]
 #![no_main]
-#![allow(async_fn_in_trait)]
 
 use defmt::{info, panic, trace};
 use defmt_rtt as _;
@@ -25,7 +24,6 @@ use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 use embedded_io_async::Write;
 use panic_probe as _;
-//use crate::uart::PioUart;
 
 const PIPE_CAPACITY: usize = 256;
 const BAUD_RATE: u32 = 31250; // standard MIDI baud rate
@@ -165,7 +163,7 @@ async fn usb_write<'d, T: Instance + 'd>(
         let n = (*usb_pipe_reader).read(&mut buf).await;
         let data = &buf[..n];
         trace!("USB OUT: {:x}", data);
-        usb_tx.write_packet(&data).await?;
+        usb_tx.write_packet(data).await?;
     }
 }
 
