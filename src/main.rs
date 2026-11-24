@@ -90,8 +90,8 @@ async fn main(_spawner: Spawner) {
     let tx_program = PioUartTxProgram::new(&mut common);
     let rx_program = PioUartRxProgram::new(&mut common);
 
-    let mut uart_tx = PioUartTx::new(BAUD_RATE, &mut common, sm0, p.PIN_0, &tx_program);
-    let mut uart_rx = PioUartRx::new(BAUD_RATE, &mut common, sm1, p.PIN_1, &rx_program);
+    let mut uart_tx = PioUartTx::new(BAUD_RATE, &mut common, sm0, p.PIN_14, &tx_program);
+    let mut uart_rx = PioUartRx::new(BAUD_RATE, &mut common, sm1, p.PIN_6, &rx_program);
 
     // Pipe setup
     let mut usb_pipe: Pipe<NoopRawMutex, PIPE_CAPACITY> = Pipe::new();
