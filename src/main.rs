@@ -9,17 +9,19 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, panic, trace};
+use defmt::{info, panic, trace, warn};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join3};
 use embassy_rp::peripherals::{PIO0, USB};
 use embassy_rp::pio_programs::uart::{PioUartRx, PioUartRxProgram, PioUartTx, PioUartTxProgram};
+use embassy_rp::uid::uid_hex;
 use embassy_rp::usb::{Driver, Instance, InterruptHandler};
 use embassy_rp::{bind_interrupts, pio};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::pipe::Pipe;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, Receiver, Sender, State};
+use embassy_usb::class::midi::{MidiClass, MidiClassConfig, MidiPacketReader, MidiPacketWriter}; // , MidiClassState
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 use embedded_io_async::Write;
@@ -48,8 +50,8 @@ async fn main(_spawner: Spawner) {
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
-    config.product = Some("PIO UART example");
-    config.serial_number = Some("12345678");
+    config.product = Some("Rustical USB-MIDI interface");
+    config.serial_number = Some(uid_hex());
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -70,14 +72,25 @@ async fn main(_spawner: Spawner) {
         &mut control_buf,
     );
 
-    // Create classes on the builder.
-    let class = CdcAcmClass::new(&mut builder, &mut state, 64);
+    // Creates class using the builder.
+    // The default configuration returns basic setup with 1 IN and 1 OUT jack.
+    let mut class = MidiClass::new(&mut builder, MidiClassConfig::default());
 
     // Build the builder.
     let mut usb = builder.build();
 
     // Run the USB device.
     let usb_fut = usb.run();
+
+    // Use the Midi class!
+    let midi_fut = async {
+        loop {
+            class.wait_connection().await;
+            info!("Connected");
+            let _ = midi_echo(&mut class).await;
+            info!("Disconnected");
+        }
+    };
 
     // PIO UART setup
     let pio::Pio {
