@@ -9,19 +9,17 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, panic, trace, warn};
+use defmt::{info, panic, trace};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join3};
 use embassy_rp::peripherals::{PIO0, USB};
 use embassy_rp::pio_programs::uart::{PioUartRx, PioUartRxProgram, PioUartTx, PioUartTxProgram};
-use embassy_rp::uid::uid_hex;
 use embassy_rp::usb::{Driver, Instance, InterruptHandler};
 use embassy_rp::{bind_interrupts, pio};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::pipe::Pipe;
-use embassy_usb::class::cdc_acm::{CdcAcmClass, Receiver, Sender, State};
-use embassy_usb::class::midi::{MidiClass, MidiClassConfig, MidiPacketReader, MidiPacketWriter}; // , MidiClassState
+use embassy_usb::class::midi::MidiClass;
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 use embedded_io_async::Write;
@@ -51,7 +49,7 @@ async fn main(_spawner: Spawner) {
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
     config.product = Some("Rustical USB-MIDI interface");
-    config.serial_number = Some(uid_hex());
+    config.serial_number = Some("12345678");
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
@@ -60,8 +58,6 @@ async fn main(_spawner: Spawner) {
     let mut config_descriptor = [0; 256];
     let mut bos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
-
-    let mut state = State::new();
 
     let mut builder = Builder::new(
         driver,
@@ -74,7 +70,12 @@ async fn main(_spawner: Spawner) {
 
     // Creates class using the builder.
     // The default configuration returns basic setup with 1 IN and 1 OUT jack.
-    let mut class = MidiClass::new(&mut builder, MidiClassConfig::default());
+    let mut midi = MidiClass::new(
+        &mut builder,
+        1,  // number of input jacks
+        1,  // number of output jacks
+        64, // max packet size for the endpoints
+    );
 
     // Build the builder.
     let mut usb = builder.build();
@@ -82,12 +83,12 @@ async fn main(_spawner: Spawner) {
     // Run the USB device.
     let usb_fut = usb.run();
 
-    // Use the Midi class!
+    //Use the Midi class!
     let midi_fut = async {
         loop {
-            class.wait_connection().await;
+            midi.wait_connection().await;
             info!("Connected");
-            let _ = midi_echo(&mut class).await;
+            let _ = midi_echo(&mut midi).await;
             info!("Disconnected");
         }
     };
@@ -113,22 +114,7 @@ async fn main(_spawner: Spawner) {
     let mut uart_pipe: Pipe<NoopRawMutex, PIPE_CAPACITY> = Pipe::new();
     let (mut uart_pipe_reader, mut uart_pipe_writer) = uart_pipe.split();
 
-    let (mut usb_tx, mut usb_rx) = class.split();
-
-    // Read + write from USB
-    let usb_future = async {
-        loop {
-            info!("Wait for USB connection");
-            usb_rx.wait_connection().await;
-            info!("Connected");
-            let _ = join(
-                usb_read(&mut usb_rx, &mut uart_pipe_writer),
-                usb_write(&mut usb_tx, &mut usb_pipe_reader),
-            )
-            .await;
-            info!("Disconnected");
-        }
-    };
+    //    let (mut usb_tx, mut usb_rx) = class.split();
 
     // Read + write from UART
     let uart_future = join(
@@ -138,7 +124,7 @@ async fn main(_spawner: Spawner) {
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join3(usb_fut, usb_future, uart_future).await;
+    join3(usb_fut, midi_fut, uart_future).await;
 }
 
 struct Disconnected {}
@@ -149,34 +135,6 @@ impl From<EndpointError> for Disconnected {
             EndpointError::BufferOverflow => panic!("Buffer overflow"),
             EndpointError::Disabled => Disconnected {},
         }
-    }
-}
-
-/// Read from the USB and write it to the UART TX pipe
-async fn usb_read<'d, T: Instance + 'd>(
-    usb_rx: &mut Receiver<'d, Driver<'d, T>>,
-    uart_pipe_writer: &mut embassy_sync::pipe::Writer<'_, NoopRawMutex, PIPE_CAPACITY>,
-) -> Result<(), Disconnected> {
-    let mut buf = [0; 64];
-    loop {
-        let n = usb_rx.read_packet(&mut buf).await?;
-        let data = &buf[..n];
-        trace!("USB IN: {:x}", data);
-        uart_pipe_writer.write_all(data).await;
-    }
-}
-
-/// Read from the USB TX pipe and write it to the USB
-async fn usb_write<'d, T: Instance + 'd>(
-    usb_tx: &mut Sender<'d, Driver<'d, T>>,
-    usb_pipe_reader: &mut embassy_sync::pipe::Reader<'_, NoopRawMutex, PIPE_CAPACITY>,
-) -> Result<(), Disconnected> {
-    let mut buf = [0; 64];
-    loop {
-        let n = (*usb_pipe_reader).read(&mut buf).await;
-        let data = &buf[..n];
-        trace!("USB OUT: {:x}", data);
-        usb_tx.write_packet(data).await?;
     }
 }
 
@@ -203,5 +161,22 @@ async fn uart_write<PIO: pio::Instance, const SM: usize>(
         let data = &buf[..n];
         trace!("UART OUT: {:x}", data);
         uart_tx.write(data).await;
+    }
+}
+
+async fn midi_echo<'d, T: Instance + 'd>(
+    class: &mut MidiClass<'d, Driver<'d, T>>,
+) -> Result<(), Disconnected> {
+    let mut buf = [0; 64];
+    let mut output = [0; 64];
+    'transfer: loop {
+        let n = class.read_packet(&mut buf).await?;
+        let data = &buf[..n];
+        info!("data: {:x}", data);
+
+        for packet in buf[..n].chunks_exact(4) {
+            info!("packet: {:x}", packet);
+            class.write_packet(data).await?;
+        }
     }
 }
