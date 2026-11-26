@@ -26,10 +26,10 @@ use embedded_io_async::{Read, Write};
 use panic_probe as _;
 
 const BAUD_RATE: u32 = 31250; // standard MIDI baud rate
-
+const MIDI_PACKET_SIZE: usize = 4; // 4 bytes per MIDI packet
 // Queues of 16 3-byte MIDI messages.
-static UART_IN_MIDI_OUT: Channel<ThreadModeRawMutex, [u8; 3], 16> = Channel::new();
-static MIDI_IN_UART_OUT: Channel<ThreadModeRawMutex, [u8; 3], 16> = Channel::new();
+static UART_IN_MIDI_OUT: Channel<ThreadModeRawMutex, [u8; MIDI_PACKET_SIZE], 16> = Channel::new();
+static MIDI_IN_UART_OUT: Channel<ThreadModeRawMutex, [u8; MIDI_PACKET_SIZE], 16> = Channel::new();
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -145,8 +145,8 @@ impl From<EndpointError> for Disconnected {
 /// Read from the UART and write it to the MIDI IN channel.
 async fn uart_read<PIO: pio::Instance, const SM: usize>(uart_rx: &mut PioUartRx<'_, PIO, SM>) -> ! {
     loop {
-        let mut packet: [u8; 3] = [0; 3];
-        let _ = uart_rx.read_exact(&mut packet).await;
+        let byte = uart_rx.read_u8().await;
+        let packet = [0x0F, byte, 0, 0];
         trace!("UART IN: {:x}", packet);
         UART_IN_MIDI_OUT.send(packet).await;
     }
@@ -159,7 +159,7 @@ async fn uart_write<PIO: pio::Instance, const SM: usize>(
     loop {
         let data = MIDI_IN_UART_OUT.receive().await;
         trace!("UART OUT: {:x}", data);
-        uart_tx.write(&data).await;
+        uart_tx.write(&data[1..]).await;
     }
 }
 
@@ -174,7 +174,7 @@ async fn midi_echo_in<'d, T: Instance + 'd>(
 
         for packet in buf[..n].chunks_exact(4) {
             info!("packet: {:x}", packet);
-            let uart_packet: [u8; 3] = packet[1..4].try_into().unwrap();
+            let uart_packet: [u8; MIDI_PACKET_SIZE] = packet[..4].try_into().unwrap();
             MIDI_IN_UART_OUT.send(uart_packet).await;
         }
     }
@@ -186,7 +186,6 @@ async fn midi_echo_out<'d, T: Instance + 'd>(
     loop {
         let packet = UART_IN_MIDI_OUT.receive().await;
         info!("packet: {:x}", packet);
-        let midi_packet: [u8; 4] = [0x09, packet[0], packet[1], packet[2]];
-        midi.write_packet(&midi_packet).await?;
+        midi.write_packet(&packet).await?;
     }
 }
