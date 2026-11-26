@@ -23,6 +23,8 @@ use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 use embedded_io_async::{Read, Write};
+use midly::live::LiveEvent;
+use midly::stream::MidiStream;
 use panic_probe as _;
 
 const BAUD_RATE: u32 = 31250; // standard MIDI baud rate
@@ -142,17 +144,41 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
+fn to_usb_packet(event: LiveEvent<'_>) -> Option<[u8; 4]> {
+    let mut packet = [0u8; 4];
+    // Serialize the LiveEvent into a USB MIDI packet.
+    event.write(&mut &mut packet[1..]).ok()?;
+
+    // Determine the CIN from the status byte.
+    packet[0] = match packet[1] {
+        0x80..=0xEF => packet[1] >> 4, // Channel Voice Messages
+        0xF1 | 0xF3 => 0x2,            // System Common Messages (2 bytes)
+        0xF2 => 0x3,                   // System Common Messages (3 bytes)
+        0xF6 | 0xF7 => 0x5,            // System Common Messages (1 byte)
+        0xF8..=0xFF => 0x0F,           // System
+        _ => return None,              // Invalid status byte
+    };
+
+    Some(packet)
+}
 /// Read from the UART and write it to the MIDI IN channel.
 async fn uart_read<PIO: pio::Instance, const SM: usize>(uart_rx: &mut PioUartRx<'_, PIO, SM>) -> ! {
+    let mut parser = MidiStream::new();
+
     loop {
         let byte = uart_rx.read_u8().await;
-        let packet = [0x0F, byte, 0, 0];
-        trace!("UART IN: {:x}", packet);
-        UART_IN_MIDI_OUT.send(packet).await;
+        let buf = [byte];
+        trace!("UART IN: {:x}", buf);
+        parser.feed(&buf, |event| {
+            if let Some(packet) = to_usb_packet(event) {
+                trace!("UART IN MIDI: {:x}", packet);
+                UART_IN_MIDI_OUT.try_send(packet);
+            }
+        });
     }
 }
 
-/// Read from the UART TX pipe and write it to the UART
+// Read from the UART TX pipe and write it to the UART.
 async fn uart_write<PIO: pio::Instance, const SM: usize>(
     uart_tx: &mut PioUartTx<'_, PIO, SM>,
 ) -> ! {
