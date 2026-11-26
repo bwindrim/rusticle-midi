@@ -31,12 +31,16 @@ target = "thumbv6m-none-eabi"
 #   have SIMD)
 linker = "flip-link"
 rustflags = [
-    "-C", "link-arg=--nmagic",
-    "-C", "link-arg=-Tlink.x",
-    "-C", "link-arg=-Tdefmt.x",
-    "-C", "no-vectorize-loops",
+    "-C",
+    "link-arg=--nmagic",
+    "-C",
+    "link-arg=-Tlink.x",
+    "-C",
+    "link-arg=-Tdefmt.x",
+    "-C",
+    "no-vectorize-loops",
 ]
-
+runner = "probe-rs run --chip rp2040"
 
 # This is the hard-float ABI for Arm mode.
 #
@@ -54,10 +58,14 @@ rustflags = [
 # * linker argument -Tdefmt.x also tells the linker to use `defmt.x` as a
 #   secondary linker script. This is required to make defmt_rtt work.
 rustflags = [
-    "-C", "link-arg=--nmagic",
-    "-C", "link-arg=-Tlink.x",
-    "-C", "link-arg=-Tdefmt.x",
-    "-C", "target-cpu=cortex-m33",
+    "-C",
+    "link-arg=--nmagic",
+    "-C",
+    "link-arg=-Tlink.x",
+    "-C",
+    "link-arg=-Tdefmt.x",
+    "-C",
+    "target-cpu=cortex-m33",
 ]
 
 
@@ -77,9 +85,12 @@ rustflags = [
 # * linker argument -Tdefmt.x also tells the linker to use `defmt.x` as a
 #   secondary linker script. This is required to make defmt_rtt work.
 rustflags = [
-    "-C", "link-arg=--nmagic",
-    "-C", "link-arg=-Trp2350_riscv.x",
-    "-C", "link-arg=-Tdefmt.x",
+    "-C",
+    "link-arg=--nmagic",
+    "-C",
+    "link-arg=-Trp2350_riscv.x",
+    "-C",
+    "link-arg=-Tdefmt.x",
 ]
 
 
