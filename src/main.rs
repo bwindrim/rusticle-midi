@@ -9,7 +9,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, panic, trace};
+use defmt::{info, panic, trace, warn};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join3};
@@ -22,7 +22,7 @@ use embassy_sync::channel::Channel;
 use embassy_usb::class::midi::{MidiClass, Receiver, Sender};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
-use embedded_io_async::{Read, Write};
+use embedded_io_async::Write;
 use midly::live::LiveEvent;
 use midly::stream::MidiStream;
 use panic_probe as _;
@@ -144,12 +144,13 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
+// Convert a LiveEvent into a 4-byte USB-MIDI packet.
 fn to_usb_packet(event: LiveEvent<'_>) -> Option<[u8; 4]> {
     let mut packet = [0u8; 4];
-    // Serialize the LiveEvent into a USB MIDI packet.
+    // Serialize the LiveEvent into bytes 1..3 of a USB MIDI packet.
     event.write(&mut &mut packet[1..]).ok()?;
 
-    // Determine the CIN from the status byte.
+    // Determine the CIN (byte 0) from the status (byte 1).
     packet[0] = match packet[1] {
         0x80..=0xEF => packet[1] >> 4, // Channel Voice Messages
         0xF1 | 0xF3 => 0x2,            // System Common Messages (2 bytes)
@@ -161,6 +162,21 @@ fn to_usb_packet(event: LiveEvent<'_>) -> Option<[u8; 4]> {
 
     Some(packet)
 }
+
+// Convert a 4-byte USB-MIDI packet into a 1-3 byte UART-MIDI packet.
+fn from_usb_packet(packet: &[u8; 4]) -> &[u8] {
+    let cin = packet[0] & 0x0F;
+
+    let len = match cin {
+        0x5 | 0xF => 1,
+        0x2 | 0x6 | 0xC | 0xD => 2,
+        0x3 | 0x4 | 0x7..=0xB | 0xE => 3,
+        _ => 0,
+    };
+
+    &packet[1..1 + len]
+}
+
 /// Read from the UART and write it to the MIDI IN channel.
 async fn uart_read<PIO: pio::Instance, const SM: usize>(uart_rx: &mut PioUartRx<'_, PIO, SM>) -> ! {
     let mut parser = MidiStream::new();
@@ -172,7 +188,9 @@ async fn uart_read<PIO: pio::Instance, const SM: usize>(uart_rx: &mut PioUartRx<
         parser.feed(&buf, |event| {
             if let Some(packet) = to_usb_packet(event) {
                 trace!("UART IN MIDI: {:x}", packet);
-                UART_IN_MIDI_OUT.try_send(packet);
+                if UART_IN_MIDI_OUT.try_send(packet).is_err() {
+                    warn!("UART IN MIDI channel full, dropping packet");
+                }
             }
         });
     }
@@ -183,29 +201,38 @@ async fn uart_write<PIO: pio::Instance, const SM: usize>(
     uart_tx: &mut PioUartTx<'_, PIO, SM>,
 ) -> ! {
     loop {
-        let data = MIDI_IN_UART_OUT.receive().await;
-        trace!("UART OUT: {:x}", data);
-        uart_tx.write(&data[1..]).await;
+        let usb_packet = MIDI_IN_UART_OUT.receive().await;
+        let uart_packet = from_usb_packet(&usb_packet);
+        trace!("UART OUT: {:x}", uart_packet);
+        uart_tx.write(uart_packet).await;
     }
 }
 
+// Move USB-MIDI packets from the USB endpoint to the UART_OUT queue.
 async fn midi_echo_in<'d, T: Instance + 'd>(
     midi: &mut Receiver<'d, Driver<'d, T>>,
 ) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
+        // Wait for a transfer from the MIDI OUT endpoint, and read it into the buffer.
         let n = midi.read_packet(&mut buf).await?;
-        let data = &buf[..n];
-        info!("data: {:x}", data);
+        info!("data: {:x}", &buf[..n]); // Log the raw data received from the MIDI OUT endpoint
+        // Decompose the buffer into 4-byte USB-MIDI packets...
+        let (packets, remainder) = buf[..n].as_chunks::<4>();
+        // ...and warn if the remainder is not empty, since that means the transfer was not a multiple of 4 bytes.
+        if !remainder.is_empty() {
+            warn!("MIDI transfer not a multiple of 4 bytes: {:?}", remainder);
+        }
 
-        for packet in buf[..n].chunks_exact(4) {
+        // Queue each packet to the UART OUT channel.
+        for packet in packets {
             info!("packet: {:x}", packet);
-            let uart_packet: [u8; MIDI_PACKET_SIZE] = packet[..4].try_into().unwrap();
-            MIDI_IN_UART_OUT.send(uart_packet).await;
+            MIDI_IN_UART_OUT.send(*packet).await;
         }
     }
 }
 
+// Move USB-MIDI packets from the UART_IN queue to the USB endpoint.
 async fn midi_echo_out<'d, T: Instance + 'd>(
     midi: &mut Sender<'d, Driver<'d, T>>,
 ) -> Result<(), Disconnected> {
